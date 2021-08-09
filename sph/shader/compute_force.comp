@@ -1,0 +1,109 @@
+#version 460
+
+#define WORK_GROUP_SIZE 128
+
+
+layout (local_size_x = WORK_GROUP_SIZE) in;
+
+// constants
+#define NUM_PARTICLES 27000
+#define PARTICLE_STIFFNESS 3
+#define PI_FLOAT 3.1415927410125732421875f
+#define PARTICLE_RADIUS (pow(1000 * PARTICLE_MASS / PARTICLE_RESTING_DENSITY, 1.0f/3.0f)/10)/2
+#define PARTICLE_RESTING_DENSITY 998.29f
+#define THRESHOLD 7.065f
+#define SURFACE_TENSION 0.0728f
+// Mass = Density * Volume
+#define PARTICLE_MASS 0.02
+#define SMOOTHING_LENGTH 0.0457f
+#define PARTICLE_VISCOSITY 3.5f
+#define GRAVITY_FORCE vec3(0, -9820.0f, 0)
+
+layout(std430, binding = 0) buffer position_block
+{
+    vec3 position[];
+};
+
+layout(std430, binding = 1) buffer velocity_block
+{
+    vec3 velocity[];
+};
+
+layout(std430, binding = 2) buffer force_block
+{
+    vec3 force[];
+};
+
+layout(std430, binding = 3) buffer density_block
+{
+    float density[];
+};
+
+layout(std430, binding = 4) buffer pressure_block
+{
+    float pressure[];
+};
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;  
+    // compute all forces
+    vec3 pressure_force = vec3(0, 0, 0);
+    vec3 viscosity_force = vec3(0, 0, 0);
+    
+    for (uint j = 0; j < NUM_PARTICLES; j++)
+    {
+        if (i == j)
+        {
+            continue;
+        }
+        vec3 delta = position[i] - position[j];
+        float r = length(delta);
+        if (r < SMOOTHING_LENGTH)
+        {
+            // gradient of spiky kernel
+				pressure_force -= PARTICLE_MASS * (pressure[i] + pressure[j]) / (2.f * density[j]) *
+            // gradient of spiky kernel
+                -45.f / (PI_FLOAT * pow(SMOOTHING_LENGTH, 6)) * pow(SMOOTHING_LENGTH - r, 2) * normalize(delta);
+            viscosity_force += PARTICLE_MASS * (velocity[j] - velocity[i]) / density[j] *
+            // Laplacian of viscosity kernel
+                45.f / (PI_FLOAT * pow(SMOOTHING_LENGTH, 6)) * (SMOOTHING_LENGTH - r);
+        }
+		/*else if(r<10e-5)
+		{
+			 pressure_force += PARTICLE_MASS * (pressure[i]/(density[i] * density[i]) + pressure[j] / (density[j] * density[j])) *
+            // gradient of spiky kernel
+                -45.f / (PI_FLOAT * pow(SMOOTHING_LENGTH, 6)) * pow(SMOOTHING_LENGTH - r, 2) * normalize(vec3(1,1,1));
+		}*/
+    }
+	pressure_force *= density[i];
+    viscosity_force *= PARTICLE_VISCOSITY;
+
+	vec3 SurfaceNormal = vec3(0, 0, 0);
+	vec3 SurfaceTensionForce = vec3(0, 0, 0);
+
+	for (uint j = 0; j < NUM_PARTICLES; j++)
+    {
+        vec3 delta = position[i] - position[j];
+        float r = length(delta);
+        if (r < SMOOTHING_LENGTH)
+        {
+            SurfaceNormal += (PARTICLE_MASS / density[j]) * (-delta * (945 / (32 * PI_FLOAT * pow(SMOOTHING_LENGTH, 9))) * pow(SMOOTHING_LENGTH * SMOOTHING_LENGTH - r*r, 2));
+        }
+    }
+
+	for (uint j = 0; j < NUM_PARTICLES; j++)
+    {
+        vec3 delta = position[i] - position[j];
+        float r = length(delta);
+		if(r >= THRESHOLD && r < SMOOTHING_LENGTH)
+		{ 
+				SurfaceTensionForce += (PARTICLE_MASS / density[j]) * (-945 / (32 * PI_FLOAT * pow(SMOOTHING_LENGTH, 9))) *(SMOOTHING_LENGTH * SMOOTHING_LENGTH - r*r) * (3*SMOOTHING_LENGTH*SMOOTHING_LENGTH-7*r*r);
+		}
+    }
+
+	SurfaceTensionForce = -(normalize(SurfaceNormal) * SURFACE_TENSION * SurfaceTensionForce);
+    vec3 external_force = (density[i] * GRAVITY_FORCE);
+
+    force[i] = pressure_force + viscosity_force + external_force;
+}
